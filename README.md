@@ -1,3 +1,3 @@
-# vllm-openai-gpt-oss
+# vllm-openai-audio
 
-This is a docker image for vLLM that contains the gpt-oss python package to support web-search-preview.
+This is a docker image for vLLM with support for audio models.
