@@ -3,3 +3,4 @@ librosa
 scipy
 soundfile
 mistral_common[audio]
+pydub
