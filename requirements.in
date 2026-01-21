@@ -4,3 +4,8 @@ scipy
 soundfile
 mistral_common[audio]
 pydub
+
+# Audio proxy dependencies
+fastapi
+httpx
+uvicorn
