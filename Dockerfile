@@ -5,3 +5,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg && rm -r
 
 COPY requirements.txt .
 RUN uv pip install --system --require-hashes -r requirements.txt
+
+# Copy audio preprocessing proxy
+COPY audio_proxy.py /app/audio_proxy.py
+COPY entrypoint.sh /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh
+
+# Proxy listens on 8082, vLLM on 8001
+ENV VLLM_URL=http://127.0.0.1:8001
+ENV PROXY_PORT=8082
+
+ENTRYPOINT ["/app/entrypoint.sh"]
