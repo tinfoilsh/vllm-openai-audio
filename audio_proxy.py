@@ -32,6 +32,30 @@ app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)  # Disable docs e
 
 VLLM_URL = os.environ.get("VLLM_URL", "http://127.0.0.1:8001")
 MAX_AUDIO_SIZE = int(os.environ.get("MAX_AUDIO_SIZE_MB", "1024")) * 1024 * 1024  # Default 1024MB
+CHUNK_SIZE = 64 * 1024  # 64KB chunks for streaming reads
+
+
+async def read_upload_with_limit(file: UploadFile, max_size: int) -> bytes:
+    """
+    Read an uploaded file with size limit enforcement during streaming.
+    Prevents memory exhaustion by checking size as we read.
+    """
+    chunks = []
+    total_size = 0
+
+    while True:
+        chunk = await file.read(CHUNK_SIZE)
+        if not chunk:
+            break
+        total_size += len(chunk)
+        if total_size > max_size:
+            raise HTTPException(
+                status_code=413,
+                detail=f"Audio file too large. Maximum size: {max_size // (1024*1024)}MB"
+            )
+        chunks.append(chunk)
+
+    return b"".join(chunks)
 
 # All audio formats FFmpeg can typically decode
 SUPPORTED_FORMATS = {
@@ -175,12 +199,7 @@ async def transcriptions(
     Proxy endpoint that converts audio to WAV before forwarding to vLLM.
     Supports all audio formats that FFmpeg can decode.
     """
-    content = await file.read()
-    
-    # Size limit check
-    if len(content) > MAX_AUDIO_SIZE:
-        raise HTTPException(status_code=413, detail=f"Audio file too large. Maximum size: {MAX_AUDIO_SIZE // (1024*1024)}MB")
-    
+    content = await read_upload_with_limit(file, MAX_AUDIO_SIZE)
     ext = detect_format(file.filename or "", file.content_type or "")
     print(f"[audio_proxy] Transcription: {len(content)} bytes, format={ext}")
 
@@ -230,12 +249,7 @@ async def translations(
     Proxy endpoint for audio translations (translate audio to English text).
     Converts audio to WAV before forwarding to vLLM.
     """
-    content = await file.read()
-    
-    # Size limit check
-    if len(content) > MAX_AUDIO_SIZE:
-        raise HTTPException(status_code=413, detail=f"Audio file too large. Maximum size: {MAX_AUDIO_SIZE // (1024*1024)}MB")
-    
+    content = await read_upload_with_limit(file, MAX_AUDIO_SIZE)
     ext = detect_format(file.filename or "", file.content_type or "")
     print(f"[audio_proxy] Translation: {len(content)} bytes, format={ext}")
 
