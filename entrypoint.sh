@@ -5,7 +5,7 @@ set -e
 
 # Start the audio preprocessing proxy in the background
 echo "Starting audio preprocessing proxy on port ${PROXY_PORT:-8082}..."
-python /app/audio_proxy.py &
+python3 /app/audio_proxy.py &
 PROXY_PID=$!
 
 # Give the proxy a moment to start
