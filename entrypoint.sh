@@ -11,7 +11,6 @@ PROXY_PID=$!
 # Give the proxy a moment to start
 sleep 2
 
-# Execute vLLM with all passed arguments
-# vLLM will listen on port 8001 by default (set via args)
+# Execute vLLM with all passed arguments (mimics vLLM's ENTRYPOINT ["vllm" "serve"])
 echo "Starting vLLM..."
-exec "$@"
+exec vllm serve "$@"
