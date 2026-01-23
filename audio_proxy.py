@@ -84,8 +84,8 @@ def convert_to_wav(input_bytes: bytes, input_format: str) -> bytes:
     Security: Uses a private temp directory (0o700) so all files inside are
     protected by directory permissions - no race condition window.
     """
-    # Create a private temp directory - only owner can access anything inside
-    tmp_dir = tempfile.mkdtemp(prefix="audio_", mode=0o700)
+    # Create a private temp directory
+    tmp_dir = tempfile.mkdtemp(prefix="audio_")
     random_id = secrets.token_hex(16)
     inp_path = os.path.join(tmp_dir, f"in_{random_id}{input_format}")
     out_path = os.path.join(tmp_dir, f"out_{random_id}.wav")

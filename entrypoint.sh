@@ -4,8 +4,9 @@
 set -e
 
 # Start the audio preprocessing proxy in the background
+# Use setsid to create new session, preventing terminal signals from stopping FFmpeg
 echo "Starting audio preprocessing proxy on port ${PROXY_PORT:-8082}..."
-python3 /app/audio_proxy.py &
+setsid python3 /app/audio_proxy.py &
 PROXY_PID=$!
 
 # Give the proxy a moment to start
