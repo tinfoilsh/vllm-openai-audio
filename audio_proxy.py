@@ -19,19 +19,23 @@ Security:
 - No logging of user content or filenames
 """
 
+import base64
+import json
 import os
+import re
 import secrets
 import shutil
 import subprocess
 import tempfile
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, Request, UploadFile, File, Form, HTTPException
+from fastapi.responses import JSONResponse, StreamingResponse
 import httpx
 
 app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)  # Disable docs endpoints
 
 VLLM_URL = os.environ.get("VLLM_URL", "http://127.0.0.1:8001")
 MAX_AUDIO_SIZE = int(os.environ.get("MAX_AUDIO_SIZE_MB", "1024")) * 1024 * 1024  # Default 1024MB
+MAX_BODY_SIZE = MAX_AUDIO_SIZE  # JSON body limit (base64 audio can be large)
 CHUNK_SIZE = 64 * 1024  # 64KB chunks for streaming reads
 
 
@@ -283,6 +287,144 @@ async def translations(
         status_code=resp.status_code,
         content=resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {"text": resp.text}
     )
+
+
+# ---------------------------------------------------------------------------
+# Chat completions with audio support (Q&A, summarization, function calling)
+# ---------------------------------------------------------------------------
+
+DATA_URL_PATTERN = re.compile(r"^data:([^;]+);base64,(.+)$", re.DOTALL)
+
+WAV_MIMES = ("audio/wav", "audio/wave", "audio/x-wav")
+
+
+def _decode_and_convert(audio_bytes: bytes, ext: str, label: str) -> bytes:
+    """Base64-decode is caller's job; this converts raw audio bytes to WAV."""
+    print(f"[audio_proxy] Converting chat audio ({label}): {len(audio_bytes)} bytes -> WAV")
+    return convert_to_wav(audio_bytes, ext)
+
+
+def _convert_data_url(data_url: str) -> str:
+    """Convert a ``data:mime;base64,…`` audio URL to WAV. No-op if already WAV."""
+    match = DATA_URL_PATTERN.match(data_url)
+    if not match:
+        return data_url
+    mime_type = match.group(1).lower()
+    if mime_type in WAV_MIMES:
+        return data_url
+    audio_bytes = base64.b64decode(match.group(2))
+    ext = CONTENT_TYPE_TO_EXT.get(mime_type, ".bin")
+    wav_bytes = _decode_and_convert(audio_bytes, ext, mime_type)
+    wav_b64 = base64.b64encode(wav_bytes).decode("ascii")
+    return f"data:audio/wav;base64,{wav_b64}"
+
+
+def process_messages_audio(messages: list) -> list:
+    """
+    Walk through chat messages and convert any embedded audio to WAV.
+    Handles both Mistral (audio_url) and OpenAI (input_audio) content formats.
+    """
+    for message in messages:
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+
+        for part in content:
+            part_type = part.get("type", "")
+
+            # Mistral / vLLM audio_url format
+            if part_type == "audio_url":
+                audio_url = part.get("audio_url")
+                if isinstance(audio_url, str) and audio_url.startswith("data:"):
+                    part["audio_url"] = _convert_data_url(audio_url)
+                elif isinstance(audio_url, dict):
+                    url = audio_url.get("url", "")
+                    if url.startswith("data:"):
+                        audio_url["url"] = _convert_data_url(url)
+
+            # OpenAI input_audio format
+            elif part_type == "input_audio":
+                input_audio = part.get("input_audio", {})
+                fmt = input_audio.get("format", "")
+                data = input_audio.get("data", "")
+                if data and fmt and fmt != "wav":
+                    ext = f".{fmt}"
+                    try:
+                        audio_bytes = base64.b64decode(data)
+                        wav_bytes = _decode_and_convert(audio_bytes, ext, f".{fmt}")
+                        input_audio["data"] = base64.b64encode(wav_bytes).decode("ascii")
+                        input_audio["format"] = "wav"
+                    except Exception as e:
+                        print(f"[audio_proxy] Failed to convert input_audio ({fmt}): {e}")
+
+    return messages
+
+
+@app.post("/v1/chat/completions")
+async def chat_completions(request: Request):
+    """
+    Proxy chat completions with audio support.
+    Converts any embedded audio in messages to WAV format.
+    Supports both streaming (SSE) and non-streaming responses.
+    """
+    body_bytes = await request.body()
+    if len(body_bytes) > MAX_BODY_SIZE:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Request body too large. Maximum size: {MAX_BODY_SIZE // (1024*1024)}MB"
+        )
+    body = json.loads(body_bytes)
+
+    # Convert any audio in messages to WAV
+    if "messages" in body:
+        body["messages"] = process_messages_audio(body["messages"])
+
+    is_streaming = body.get("stream", False)
+    print(f"[audio_proxy] Chat completion: model={body.get('model')}, streaming={is_streaming}")
+
+    if is_streaming:
+        # Streaming: client lifecycle managed by the generator
+        client = httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=10.0))
+        try:
+            req = client.build_request(
+                "POST",
+                f"{VLLM_URL}/v1/chat/completions",
+                json=body,
+            )
+            resp = await client.send(req, stream=True)
+        except httpx.RequestError as e:
+            await client.aclose()
+            raise HTTPException(status_code=502, detail=f"vLLM connection error: {str(e)}")
+
+        async def event_stream():
+            try:
+                async for chunk in resp.aiter_bytes():
+                    yield chunk
+            finally:
+                await resp.aclose()
+                await client.aclose()
+
+        return StreamingResponse(
+            event_stream(),
+            status_code=resp.status_code,
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache"},
+        )
+    else:
+        # Non-streaming: simple request/response
+        async with httpx.AsyncClient(timeout=300.0) as client:
+            try:
+                resp = await client.post(
+                    f"{VLLM_URL}/v1/chat/completions",
+                    json=body,
+                )
+            except httpx.RequestError as e:
+                raise HTTPException(status_code=502, detail=f"vLLM connection error: {str(e)}")
+
+        return JSONResponse(
+            status_code=resp.status_code,
+            content=resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {"error": resp.text}
+        )
 
 
 @app.get("/health")
