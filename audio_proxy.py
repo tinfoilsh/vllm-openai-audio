@@ -19,6 +19,7 @@ Security:
 - No logging of user content or filenames
 """
 
+import asyncio
 import base64
 import json
 import os
@@ -27,9 +28,13 @@ import secrets
 import shutil
 import subprocess
 import tempfile
+from urllib.parse import urlparse, urlunparse
 from fastapi import FastAPI, Request, UploadFile, File, Form, HTTPException
+from fastapi import WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse, StreamingResponse
 import httpx
+import websockets
+from websockets.exceptions import ConnectionClosed
 
 app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)  # Disable docs endpoints
 
@@ -37,6 +42,15 @@ VLLM_URL = os.environ.get("VLLM_URL", "http://127.0.0.1:8001")
 MAX_AUDIO_SIZE = int(os.environ.get("MAX_AUDIO_SIZE_MB", "1024")) * 1024 * 1024  # Default 1024MB
 MAX_BODY_SIZE = MAX_AUDIO_SIZE  # JSON body limit (base64 audio can be large)
 CHUNK_SIZE = 64 * 1024  # 64KB chunks for streaming reads
+
+
+def to_websocket_url(http_url: str) -> str:
+    parsed = urlparse(http_url)
+    scheme = "wss" if parsed.scheme == "https" else "ws"
+    return urlunparse((scheme, parsed.netloc, parsed.path, parsed.params, parsed.query, parsed.fragment))
+
+
+VLLM_WS_URL = to_websocket_url(VLLM_URL)
 
 
 async def read_upload_with_limit(file: UploadFile, max_size: int) -> bytes:
@@ -425,6 +439,55 @@ async def chat_completions(request: Request):
             status_code=resp.status_code,
             content=resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {"error": resp.text}
         )
+
+
+@app.websocket("/v1/realtime")
+async def realtime_proxy(websocket: WebSocket):
+    """
+    Transparent WebSocket proxy for vLLM realtime audio transcription.
+    The client must already send PCM16 chunks in the format expected by vLLM.
+    """
+    await websocket.accept()
+    backend_url = f"{VLLM_WS_URL}/v1/realtime"
+    print(f"[audio_proxy] Realtime proxy connect: {backend_url}", flush=True)
+
+    try:
+        async with websockets.connect(backend_url, max_size=None) as backend:
+            async def client_to_backend():
+                while True:
+                    message = await websocket.receive()
+                    msg_type = message.get("type")
+                    if msg_type == "websocket.disconnect":
+                        break
+                    if message.get("text") is not None:
+                        await backend.send(message["text"])
+                    elif message.get("bytes") is not None:
+                        await backend.send(message["bytes"])
+
+            async def backend_to_client():
+                while True:
+                    response = await backend.recv()
+                    if isinstance(response, bytes):
+                        await websocket.send_bytes(response)
+                    else:
+                        await websocket.send_text(response)
+
+            tasks = [
+                asyncio.create_task(client_to_backend()),
+                asyncio.create_task(backend_to_client()),
+            ]
+            done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            for task in pending:
+                task.cancel()
+            for task in done:
+                exc = task.exception()
+                if exc and not isinstance(exc, (WebSocketDisconnect, ConnectionClosed, asyncio.CancelledError)):
+                    raise exc
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        print(f"[audio_proxy] Realtime proxy error: {type(e).__name__}: {e}", flush=True)
+        await websocket.close(code=1011, reason="backend error")
 
 
 @app.get("/health")
