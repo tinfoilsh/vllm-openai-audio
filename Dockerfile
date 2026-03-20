@@ -1,10 +1,10 @@
-FROM vllm/vllm-openai:v0.17.0@sha256:2296a2a7e1ce1dc59c6577ba5900f4e9910b76c4a0cb134833a8137f92404dfa
+FROM vllm/vllm-openai:v0.18.0-cu130@sha256:9951d6e8f54921a5c80b1b106aa67d495bdaf19d139bd1a8d34d42da747df2d5
 
 # Add FFmpeg for MP3/M4A audio format support (required by audioread/librosa)
 RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.in .
-RUN uv pip install --system -r requirements.in
+COPY requirements.txt .
+RUN uv pip install --system --require-hashes -r requirements.txt
 
 # Copy audio preprocessing proxy
 COPY audio_proxy.py /app/audio_proxy.py
